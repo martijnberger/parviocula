@@ -1,0 +1,25 @@
+{
+    "name": "Parviocula Development",
+    "build": {
+        "dockerfile": "Dockerfile"
+    },
+    "customizations": {
+        "vscode": {
+            "extensions": [
+                "rust-lang.rust-analyzer",
+                "tamasfe.even-better-toml",
+                "serayuzgur.crates",
+                "ms-python.python",
+                "ms-python.vscode-pylance"
+            ],
+            "settings": {
+                "rust-analyzer.checkOnSave.command": "clippy",
+                "python.defaultInterpreterPath": "/usr/local/bin/python3",
+                "python.linting.enabled": true
+            }
+        }
+    },
+    "forwardPorts": [],
+    "postCreateCommand": "rustup component add rustfmt clippy",
+    "remoteUser": "vscode"
+} 
