@@ -1,4 +1,15 @@
 /target
 /Cargo.lock
-
 examples/*/target
+
+# Dev environment
+.devcontainer.json
+.dmypy.json
+.DS_Store
+.env
+.envrc
+.jj
+.netrc
+.venv
+.vscode
+/.bashrc
