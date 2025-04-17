@@ -1,9 +1,10 @@
 use std::net::SocketAddr;
 
 use axum::{extract::Query, response::IntoResponse, routing::get, Router};
-use parviocula::{AsgiHandler, ServerContext};
+use parviocula::{AsgiService, ServerContext};
 use pyo3::prelude::*;
 use serde::Deserialize;
+use tower::Service;
 
 #[derive(Deserialize)]
 struct RootQuery {
@@ -14,10 +15,15 @@ async fn get_root(Query(RootQuery { name }): Query<RootQuery>) -> impl IntoRespo
     format!("Hello {name}, from rust!")
 }
 
-async fn start(port: u16, shutdown_signal: tokio::sync::oneshot::Receiver<()>, asgi: AsgiHandler) {
+async fn start(port: u16, shutdown_signal: tokio::sync::oneshot::Receiver<()>, asgi: AsgiService) {
+
+    let asgi_route = tower::service_fn(move |req| {
+        asgi.clone().call(req)
+    });
+
     let app = Router::new()
-        .route("/post_or_get", get(get_root).post(asgi.clone()))
-        .fallback(asgi);
+        .route("/post_or_get", get(get_root).post_service(asgi_route.clone()))
+        .fallback_service(asgi_route.clone());
     let addr = SocketAddr::new([127, 0, 0, 1].into(), port);
     let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
 

@@ -1,11 +1,12 @@
 use axum::{serve, Router};
-use parviocula::{AsgiHandler, ServerContext};
+use parviocula::{AsgiService, ServerContext};
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::types::PyString;
 use pyo3::PyResult;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use tokio::net::TcpListener;
+use tower::Service;
 
 #[pyfunction]
 #[pyo3(signature = (app, host=None, port=None))]
@@ -26,8 +27,10 @@ fn create_server(
 
     let ctx = parviocula::create_server_context(
         app,
-        Box::new(move |asgi: AsgiHandler, rx| async move {
-            let app = Router::new().fallback(asgi);
+        Box::new(move |asgi: AsgiService, rx| async move {
+            // Use the tower service as a fallback handler
+            let app = Router::new()
+                .fallback_service(tower::service_fn(move |req| asgi.clone().call(req)));
             let addr = SocketAddr::new(host, port);
             let listener = match TcpListener::bind(addr).await {
                 Ok(listener) => listener,

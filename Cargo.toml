@@ -11,18 +11,27 @@ license = "MIT"
 readme = "README.md"
 
 [dependencies]
-axum = "0.8.1"
-axum-extra = "0.10.0"
+axum = { version = "0.8.3", optional = true }
+bytes = "1.10.1"
 futures = "0.3.31"
+http = "1.3.1"
+http-body = "1.0.1"
 http-body-util = "0.1.3"
-hyper = "1.6.0"
 percent-encoding = "2.3.1"
 pyo3 = { version = "0.24.0" }
 pyo3-async-runtimes = { version = "0.24.0", features = ["tokio-runtime"] }
-tokio = { version = "1.44.1", features = ["sync"] }
+tokio = { version = "1.44.1", features = ["full", "sync", "test-util"] }
+tower = { version = "0.5.2", features = ["full"] }
+tower-service = "0.3.3"
 tracing = { version = "0.1.41", optional = true }
 
+[dev-dependencies]
+tokio = { version = "1.44.2", features = ["full", "test-util"] }
+tower-test = "0.4.0"
+
 [features]
+default = ["auto-initialize"]
 tracing = ["dep:tracing"]
 extension-module = ["pyo3/extension-module"]
 auto-initialize = ["pyo3/auto-initialize"]
+axum = ["dep:axum"]

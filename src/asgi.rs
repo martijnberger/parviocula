@@ -1,11 +1,7 @@
 use crate::Sender;
-use axum::{
-    body::{to_bytes, Body, Bytes},
-    handler::Handler,
-    http::{HeaderName, HeaderValue, Request, StatusCode, Version},
-    response::{IntoResponse, Response},
-};
-
+use crate::BoxError;
+use futures::future::BoxFuture;
+use http::status::StatusCode;
 use pyo3::types::{PyBytes, PyDict, PyInt, PyString};
 use pyo3::{
     exceptions::PyRuntimeError,
@@ -13,31 +9,61 @@ use pyo3::{
     types::{PyList, PySequence},
     DowncastError, DowncastIntoError,
 };
+use tower::Layer;
 use std::{
-    future::Future,
-    pin::Pin,
     sync::{
         atomic::{AtomicBool, Ordering},
         Arc,
     },
+    task::{Context, Poll},
 };
 use tokio::sync::{
     mpsc::{self, UnboundedReceiver},
     Mutex,
 };
 
+use bytes::Bytes;
+
+use crate::http::{to_bytes, Body};
+
 #[derive(Clone)]
-pub struct AsgiHandler {
+pub struct ASGILayer {
     app: Arc<PyObject>,
     locals: Arc<pyo3_async_runtimes::TaskLocals>,
 }
 
-impl AsgiHandler {
+impl ASGILayer {
+    pub fn new(asgi_service: AsgiService) -> Self {
+        ASGILayer { 
+            app: asgi_service.app,
+            locals: asgi_service.locals,
+         }
+    }
+}
+
+impl<S> Layer<S> for ASGILayer {
+    type Service = AsgiService;
+    
+    fn layer(&self, _service: S) -> Self::Service {
+        AsgiService {
+            app: self.app.clone(),
+            locals: self.locals.clone(),
+        }
+    }
+}
+
+#[derive(Clone)]
+pub struct AsgiService {
+    app: Arc<PyObject>,
+    locals: Arc<pyo3_async_runtimes::TaskLocals>,
+}
+
+impl AsgiService {
     pub fn new_with_locals(
         app: Arc<PyObject>,
         locals: Arc<pyo3_async_runtimes::TaskLocals>,
-    ) -> AsgiHandler {
-        AsgiHandler { app, locals }
+    ) -> AsgiService {
+        AsgiService { app, locals }
     }
 }
 
@@ -71,9 +97,9 @@ impl<'a> From<DowncastIntoError<'a>> for AsgiError {
     }
 }
 
-impl IntoResponse for AsgiError {
-    fn into_response(self) -> Response {
-        match self {
+impl AsgiError {
+    fn into_response(self) -> http::Response<Body> {
+        let (status, body) = match self {
             AsgiError::InvalidHttpVersion => (StatusCode::BAD_REQUEST, "Unsupported HTTP version"),
             AsgiError::InvalidUtf8InPath => (StatusCode::BAD_REQUEST, "Invalid Utf8 in path"),
             AsgiError::PyErr(_)
@@ -84,8 +110,17 @@ impl IntoResponse for AsgiError {
             | AsgiError::InvalidHeader => {
                 (StatusCode::INTERNAL_SERVER_ERROR, "Internal Server Error")
             }
-        }
-        .into_response()
+        };
+
+        http::Response::builder()
+            .status(status)
+            .body(Body::from(body))
+            .unwrap_or_else(|_| {
+                http::Response::builder()
+                    .status(http::StatusCode::INTERNAL_SERVER_ERROR)
+                    .body(Body::from("Failed to build error response"))
+                    .unwrap()
+            })
     }
 }
 
@@ -147,24 +182,42 @@ impl HttpReceiver {
     }
 }
 
-impl<S> Handler<AsgiHandler, S> for AsgiHandler {
-    type Future = Pin<Box<dyn Future<Output = Response<Body>> + Send>>;
+impl<R> tower_service::Service<http::Request<R>> for AsgiService
+where
+    R: Into<Body> + Send + 'static,
+{
+    type Response = http::Response<Body>;
+    type Error = Box<dyn BoxError>;
+    type Future = BoxFuture<'static, Result<Self::Response, Self::Error>>;
 
-    fn call(self, req: Request<Body>, _state: S) -> Self::Future {
-        let app = self.app.clone();
-        let (http_sender, mut http_sender_rx) = Sender::new(self.locals.clone());
-        let disconnected = Arc::new(AtomicBool::new(false));
-        let (receiver_tx, receiver_rx) = mpsc::unbounded_channel();
-        let receiver = HttpReceiver {
-            rx: Arc::new(Mutex::new(receiver_rx)),
-            disconnected: disconnected.clone(),
-            locals: self.locals.clone(),
-        };
-        let (req, body): (_, Body) = req.into_parts();
+    fn poll_ready(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        // The service is always ready to handle requests
+        Poll::Ready(Ok(()))
+    }
+
+    fn call(&mut self, req: http::Request<R>) -> Self::Future {
+        let this = self.clone();
         Box::pin(async move {
+            let app = this.app.clone();
+            let (http_sender, mut http_sender_rx) = Sender::new(this.locals.clone());
+            let disconnected = Arc::new(AtomicBool::new(false));
+            let (receiver_tx, receiver_rx) = mpsc::unbounded_channel();
+            let receiver = HttpReceiver {
+                rx: Arc::new(Mutex::new(receiver_rx)),
+                disconnected: disconnected.clone(),
+                locals: this.locals.clone(),
+            };
+
+            // Convert request body to Body
+            let (req_parts, body) = req.into_parts();
+            let body: Body = body.into();
+            let req = http::Request::from_parts(req_parts, body);
+            let (req, body) = req.into_parts();
+
             receiver_tx.send(Some(body)).unwrap();
             let _disconnected = SetTrueOnDrop(disconnected);
-            match Python::with_gil(|py| {
+            
+            let result = match Python::with_gil(|py| {
                 let asgi = PyDict::new(py);
                 asgi.set_item("spec_version", "2.0")?;
                 asgi.set_item("version", "2.0")?;
@@ -174,9 +227,9 @@ impl<S> Handler<AsgiHandler, S> for AsgiHandler {
                 scope.set_item(
                     "http_version",
                     match req.version {
-                        Version::HTTP_10 => "1.0",
-                        Version::HTTP_11 => "1.1",
-                        Version::HTTP_2 => "2",
+                        http::Version::HTTP_10 => "1.0",
+                        http::Version::HTTP_11 => "1.1",
+                        http::Version::HTTP_2 => "2",
                         _ => return Err(AsgiError::InvalidHttpVersion),
                     },
                 )?;
@@ -234,7 +287,7 @@ impl<S> Handler<AsgiHandler, S> for AsgiHandler {
                 let args = (scope, receiver, sender);
                 let res = app.call_method1(py, "__call__", args)?;
                 let fut = res.extract(py)?;
-                let coro = pyo3_async_runtimes::into_future_with_locals(&self.locals, fut)?;
+                let coro = pyo3_async_runtimes::into_future_with_locals(&this.locals, fut)?;
                 Ok::<_, AsgiError>(coro)
             }) {
                 Ok(http_coro) => {
@@ -245,7 +298,7 @@ impl<S> Handler<AsgiHandler, S> for AsgiHandler {
                         }
                     });
 
-                    let mut response = Response::builder();
+                    let mut response = http::Response::builder();
 
                     if let Some(resp) = http_sender_rx.recv().await {
                         let (status, headers) = match Python::with_gil(|py| {
@@ -297,30 +350,30 @@ impl<S> Handler<AsgiHandler, S> for AsgiHandler {
                         }) {
                             Ok((status, headers)) => (status, headers),
                             Err(e) => {
-                                return e.into_response();
+                                return Ok(e.into_response());
                             }
                         };
                         response = response.status(status);
                         if let Some(pyheaders) = headers {
                             let headers = response.headers_mut().unwrap();
                             for (name, value) in pyheaders {
-                                let name = match HeaderName::from_bytes(&name) {
+                                let name = match http::HeaderName::from_bytes(&name) {
                                     Ok(name) => name,
                                     Err(_e) => {
-                                        return AsgiError::InvalidHeader.into_response();
+                                        return Ok(AsgiError::InvalidHeader.into_response());
                                     }
                                 };
-                                let value = match HeaderValue::from_bytes(&value) {
+                                let value = match http::HeaderValue::from_bytes(&value) {
                                     Ok(value) => value,
                                     Err(_e) => {
-                                        return AsgiError::InvalidHeader.into_response();
+                                        return Ok(AsgiError::InvalidHeader.into_response());
                                     }
                                 };
                                 headers.append(name, value);
                             }
                         }
                     } else {
-                        return AsgiError::MissingResponse.into_response();
+                        return Ok(AsgiError::MissingResponse.into_response());
                     }
 
                     let mut body = Vec::new();
@@ -356,7 +409,7 @@ impl<S> Handler<AsgiHandler, S> for AsgiHandler {
                         }) {
                             Ok((bytes, more_body)) => (bytes, more_body),
                             Err(e) => {
-                                return e.into_response();
+                                return Ok(e.into_response());
                             }
                         };
                         body.extend(bytes);
@@ -367,20 +420,22 @@ impl<S> Handler<AsgiHandler, S> for AsgiHandler {
 
                     let body = Body::from(Bytes::from(body));
                     match response.body(body) {
-                        Ok(response) => response.into_response(),
+                        Ok(response) => Ok(response),
                         Err(_e) => {
                             #[cfg(feature = "tracing")]
                             tracing::error!("Failed to create response: {_e}");
-                            AsgiError::FailedToCreateResponse.into_response()
+                            Ok(AsgiError::FailedToCreateResponse.into_response())
                         }
                     }
                 }
                 Err(e) => {
                     #[cfg(feature = "tracing")]
                     tracing::error!("Error preparing request scope: {e:?}");
-                    e.into_response()
+                    Ok(e.into_response())
                 }
-            }
+            };
+            
+            result
         })
     }
 }

@@ -1,5 +1,11 @@
-mod asgi;
+pub mod asgi;
+pub mod http;
+pub mod utils;
 
+#[cfg(feature = "axum")]
+pub mod axum;
+
+use std::convert::Infallible;
 use std::future::Future;
 use std::sync::Arc;
 
@@ -9,7 +15,20 @@ use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyString};
 use tokio::sync::{mpsc, oneshot, Mutex};
 
-pub use crate::asgi::AsgiHandler;
+pub use crate::asgi::AsgiService;
+pub use crate::asgi::ASGILayer;
+
+// Helper function to map errors to Infallible
+pub fn map_infallible<T, E>(result: Result<T, E>) -> Result<T, Infallible> {
+    match result {
+        Ok(value) => Ok(value),
+        Err(_) => unreachable!("This should never happen as we're converting to Infallible"),
+    }
+}
+
+// Helper trait for creating a BoxError type
+pub trait BoxError: std::error::Error + Send + Sync + 'static {}
+impl<E: std::error::Error + Send + Sync + 'static> BoxError for E {}
 
 #[pyclass]
 struct Receiver {
@@ -60,15 +79,15 @@ impl Sender {
 }
 
 pub trait AsyncFn {
-    fn call(&self, handler: AsgiHandler, rx: oneshot::Receiver<()>) -> BoxFuture<'static, ()>;
+    fn call(&self, handler: AsgiService, rx: oneshot::Receiver<()>) -> BoxFuture<'static, ()>;
 }
 
 impl<T, F> AsyncFn for T
 where
-    T: Fn(AsgiHandler, oneshot::Receiver<()>) -> F,
+    T: Fn(AsgiService, oneshot::Receiver<()>) -> F,
     F: Future<Output = ()> + Send + 'static,
 {
-    fn call(&self, handler: AsgiHandler, rx: oneshot::Receiver<()>) -> BoxFuture<'static, ()> {
+    fn call(&self, handler: AsgiService, rx: oneshot::Receiver<()>) -> BoxFuture<'static, ()> {
         Box::pin(self(handler, rx))
     }
 }
@@ -197,7 +216,7 @@ impl ServerContext {
                     }
 
                     // create asgi service
-                    let asgi_handler = AsgiHandler::new_with_locals(Arc::new(app), locals.clone());
+                    let asgi_handler = AsgiService::new_with_locals(Arc::new(app), locals.clone());
 
                     server.call(asgi_handler, rx).await;
 
