@@ -1,6 +1,5 @@
 pub mod asgi;
 pub mod http;
-pub mod utils;
 
 #[cfg(feature = "axum")]
 pub mod axum;
@@ -16,7 +15,6 @@ use pyo3::types::{PyDict, PyString};
 use tokio::sync::{mpsc, oneshot, Mutex};
 
 pub use crate::asgi::AsgiService;
-pub use crate::asgi::ASGILayer;
 
 // Helper function to map errors to Infallible
 pub fn map_infallible<T, E>(result: Result<T, E>) -> Result<T, Infallible> {

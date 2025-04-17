@@ -1,5 +1,5 @@
-use crate::Sender;
 use crate::BoxError;
+use crate::Sender;
 use futures::future::BoxFuture;
 use http::status::StatusCode;
 use pyo3::types::{PyBytes, PyDict, PyInt, PyString};
@@ -9,7 +9,6 @@ use pyo3::{
     types::{PyList, PySequence},
     DowncastError, DowncastIntoError,
 };
-use tower::Layer;
 use std::{
     sync::{
         atomic::{AtomicBool, Ordering},
@@ -25,32 +24,6 @@ use tokio::sync::{
 use bytes::Bytes;
 
 use crate::http::{to_bytes, Body};
-
-#[derive(Clone)]
-pub struct ASGILayer {
-    app: Arc<PyObject>,
-    locals: Arc<pyo3_async_runtimes::TaskLocals>,
-}
-
-impl ASGILayer {
-    pub fn new(asgi_service: AsgiService) -> Self {
-        ASGILayer { 
-            app: asgi_service.app,
-            locals: asgi_service.locals,
-         }
-    }
-}
-
-impl<S> Layer<S> for ASGILayer {
-    type Service = AsgiService;
-    
-    fn layer(&self, _service: S) -> Self::Service {
-        AsgiService {
-            app: self.app.clone(),
-            locals: self.locals.clone(),
-        }
-    }
-}
 
 #[derive(Clone)]
 pub struct AsgiService {
@@ -216,7 +189,7 @@ where
 
             receiver_tx.send(Some(body)).unwrap();
             let _disconnected = SetTrueOnDrop(disconnected);
-            
+
             let result = match Python::with_gil(|py| {
                 let asgi = PyDict::new(py);
                 asgi.set_item("spec_version", "2.0")?;
@@ -434,7 +407,7 @@ where
                     Ok(e.into_response())
                 }
             };
-            
+
             result
         })
     }

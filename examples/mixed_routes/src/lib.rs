@@ -17,13 +17,13 @@ async fn get_root(Query(RootQuery { name }): Query<RootQuery>) -> impl IntoRespo
 
 async fn start(port: u16, shutdown_signal: tokio::sync::oneshot::Receiver<()>, asgi: AsgiService) {
 
-    let asgi_route = tower::service_fn(move |req| {
+    let asgi_service = tower::service_fn(move |req| {
         asgi.clone().call(req)
     });
 
     let app = Router::new()
-        .route("/post_or_get", get(get_root).post_service(asgi_route.clone()))
-        .fallback_service(asgi_route.clone());
+        .route("/post_or_get", get(get_root).post_service(asgi_service.clone()))
+        .fallback_service(asgi_service);
     let addr = SocketAddr::new([127, 0, 0, 1].into(), port);
     let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
 
